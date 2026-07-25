@@ -35,7 +35,7 @@ def send_telegram_msg(target_chat_id, text):
     except Exception as e:
         print("Lỗi gửi Telegram:", e)
 
-# HÀM GỌI GROQ AI (TỐC ĐỘ SIÊU NHANH)
+# HÀM GỌI GROQ AI (LLAMA 3.3 - SIÊU NHANH & MIỄN PHÍ)
 def call_groq_api(prompt):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -45,7 +45,7 @@ def call_groq_api(prompt):
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "Bạn là Trợ lý AI Trading cao cấp thuộc hệ thống Middle House Trading."},
+            {"role": "system", "content": "Bạn là Trợ lý AI Trading thuộc hệ thống Middle House Trading."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.5
@@ -111,9 +111,7 @@ async def receive_telegram(request: Request):
         chat_id = msg.get("chat", {}).get("id", TELEGRAM_CHAT_ID)
 
         text = msg.get("text", "")
-        caption = msg.get("caption", "")
 
-        # Xử lý dạy/chat văn bản
         if text:
             if text.lower().startswith("học:") or text.lower().startswith("dạy:"):
                 rule_content = text.split(":", 1)[1].strip()
@@ -122,7 +120,7 @@ async def receive_telegram(request: Request):
             else:
                 rules = load_rules()
                 rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
-                prompt = f"Quy tắc trading đã học: {rules_text}\n\nTin nhắn từ người dùng: '{text}'\nHãy trả lời ngắn gọn, phân tích chuẩn kỹ thuật."
+                prompt = f"Quy tắc trading đã học: {rules_text}\n\nTin nhắn từ người dùng: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
                 
                 try:
                     ai_reply = call_groq_api(prompt)
@@ -138,7 +136,7 @@ async def receive_telegram(request: Request):
 # 4. THÔNG BÁO TỰ ĐỘNG KHI KẾT NỐI SERVER THÀNH CÔNG
 @app.on_event("startup")
 async def startup_event():
-    welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý (Groq Engine) đã kết nối thành công và sẵn sàng hoạt động 24/7!"
+    welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý (Groq Engine) đã kết nối thành công 24/7!"
     if TELEGRAM_CHAT_ID:
         send_telegram_msg(TELEGRAM_CHAT_ID, welcome_msg)
 
