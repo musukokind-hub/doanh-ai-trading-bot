@@ -1,11 +1,11 @@
 import os
 import json
+import asyncio
 from io import BytesIO
 from fastapi import FastAPI, Request
 from PIL import Image
 import google.generativeai as genai
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import requests
 
 app = FastAPI()
 
@@ -17,13 +17,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# File lưu quy tắc bạn dạy
 RULES_FILE = "trading_rules.json"
 
 def load_rules():
     if os.path.exists(RULES_FILE):
-        with open(RULES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(RULES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
     return []
 
 def save_rule(rule_text):
@@ -32,18 +34,27 @@ def save_rule(rule_text):
     with open(RULES_FILE, "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
 
-# Khởi tạo Telegram App
-telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+def send_telegram_msg(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print("Lỗi gửi Telegram:", e)
 
-# 2. XỬ LÝ NHẬN TÍN HIỆU TỪ TRADINGVIEW (WEBHOOK)
+# 2. RECEIVE WEBHOOK FROM TRADINGVIEW
 @app.post("/webhook")
 async def receive_webhook(request: Request):
-    data = await request.json()
-    event = data.get("event")
-    symbol = data.get("symbol")
-    tf = data.get("timeframe")
-    price = data.get("price")
-    rsi = data.get("rsi")
+    try:
+        data = await request.json()
+    except Exception:
+        return {"status": "error", "message": "Invalid JSON"}
+
+    event = data.get("event", "UNKNOWN")
+    symbol = data.get("symbol", "N/A")
+    tf = data.get("timeframe", "N/A")
+    price = data.get("price", "N/A")
+    rsi = data.get("rsi", "N/A")
 
     rules = load_rules()
     rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có quy tắc cụ thể."
@@ -63,84 +74,82 @@ async def receive_webhook(request: Request):
 
     YÊU CẦU:
     1. Phân tích tín hiệu trên dựa trên quy tắc đã học.
-    2. Nếu là ENTRY, thông báo rõ ràng điểm vào.
-    3. Nếu là REVERSAL_WARNING (M5), cảnh báo anh Doanh xem xét thoát lệnh/chốt lời theo quy tắc.
-    4. Giọng văn ngắn gọn, tôn trọng, chuyên nghiệp.
+    2. Nếu là ENTRY, thông báo điểm vào rõ ràng.
+    3. Nếu là REVERSAL_WARNING (M5), cảnh báo anh Doanh xem xét thoát lệnh/chốt lời.
+    4. Trả lời ngắn gọn, chuẩn kỹ thuật trading.
     """
 
-    response = model.generate_content(prompt)
-    bot_msg = response.text
+    try:
+        response = model.generate_content(prompt)
+        send_telegram_msg(response.text)
+    except Exception as e:
+        send_telegram_msg(f"🟢 Tín hiệu {event} - {symbol} (Giá: {price}, RSI: {rsi})")
 
-    # Bắn tin nhắn qua Telegram
-    await telegram_app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=bot_msg)
     return {"status": "ok"}
 
-# 3. XỬ LÝ CHAT & DẠY HỌC QUA TELEGRAM
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    chat_id = str(update.message.chat_id)
-
-    if chat_id != str(TELEGRAM_CHAT_ID):
-        return
-
-    # Nếu câu lệnh bắt đầu bằng "Học:" hoặc "Dạy:" -> Lưu vào quy tắc
-    if user_text.lower().startswith("học:") or user_text.lower().startswith("dạy:"):
-        rule_content = user_text.split(":", 1)[1].strip()
-        save_rule(rule_content)
-        await update.message.reply_text(f"✅ Anh Doanh yên tâm, em đã ghi nhớ quy tắc mới:\n\"{rule_content}\"")
-        return
-
-    # Trò chuyện bình thường với AI
-    rules = load_rules()
-    rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
-
-    prompt = f"""
-    Bạn là Trợ lý Trading AI của anh Doanh.
-    Quy tắc đã học từ anh Doanh:
-    {rules_text}
-
-    Anh Doanh vừa nhắn: "{user_text}"
-    Hãy trả lời ngắn gọn, chuẩn kỹ thuật trading và đúng tinh thần các quy tắc đã học.
-    """
-    response = model.generate_content(prompt)
-    await update.message.reply_text(response.text)
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.message.chat_id)
-    if chat_id != str(TELEGRAM_CHAT_ID):
-        return
-
-    caption = update.message.caption or "Phân tích ảnh này giúp anh."
-    photo_file = await update.message.photo[-1].get_file()
+# 3. TELEGRAM POLLING LONG RUNNING
+async def telegram_polling():
+    last_update_id = 0
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     
-    photo_bytes = BytesIO()
-    await photo_file.download_to_memory(photo_bytes)
-    image = Image.open(photo_bytes)
+    while True:
+        try:
+            params = {"offset": last_update_id + 1, "timeout": 20}
+            res = requests.get(url, params=params, timeout=25)
+            if res.status_code == 200:
+                updates = res.json().get("result", [])
+                for update in updates:
+                    last_update_id = update["update_id"]
+                    msg = update.get("message", {})
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    
+                    if chat_id != str(TELEGRAM_CHAT_ID):
+                        continue
 
-    # Nếu nhắn học qua ảnh: "Học: [nội dung]"
-    if caption.lower().startswith("học:") or caption.lower().startswith("dạy:"):
-        rule_content = caption.split(":", 1)[1].strip()
-        prompt_learn = f"Tóm tắt ngắn gọn quy tắc trading từ hình ảnh này kết hợp với mô tả: {rule_content}"
-        response_learn = model.generate_content([prompt_learn, image])
+                    text = msg.get("text", "")
+                    caption = msg.get("caption", "")
+                    photos = msg.get("photo", [])
+
+                    # Xử lý dạy/chat dạng Text
+                    if text:
+                        if text.lower().startswith("học:") or text.lower().startswith("dạy:"):
+                            rule_content = text.split(":", 1)[1].strip()
+                            save_rule(rule_content)
+                            send_telegram_msg(f"✅ Anh Doanh yên tâm, em đã ghi nhớ quy tắc mới:\n\"{rule_content}\"")
+                        else:
+                            rules = load_rules()
+                            rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
+                            prompt = f"Bạn là Trợ lý Trading AI của anh Doanh.\nQuy tắc đã học: {rules_text}\n\nAnh Doanh nhắn: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
+                            res_ai = model.generate_content(prompt)
+                            send_telegram_msg(res_ai.text)
+
+                    # Xử lý dạy/soi dạng Ảnh
+                    elif photos:
+                        file_id = photos[-1]["file_id"]
+                        file_info = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}").json()
+                        file_path = file_info["result"]["file_path"]
+                        img_bytes = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}").content
+                        image = Image.open(BytesIO(img_bytes))
+
+                        if caption.lower().startswith("học:") or caption.lower().startswith("dạy:"):
+                            rule_content = caption.split(":", 1)[1].strip()
+                            prompt_learn = f"Tóm tắt ngắn gọn quy tắc trading từ hình ảnh này kết hợp mô tả: {rule_content}"
+                            res_ai = model.generate_content([prompt_learn, image])
+                            save_rule(f"Mẫu biểu đồ ({rule_content}): {res_ai.text}")
+                            send_telegram_msg("📸 ✅ Em đã soi ảnh và ghi nhớ bài học hình ảnh mới của anh Doanh!")
+                        else:
+                            prompt = f"Phân tích biểu đồ kỹ thuật này cho anh Doanh. Gợi ý thêm: {caption}"
+                            res_ai = model.generate_content([prompt, image])
+                            send_telegram_msg(res_ai.text)
+
+        except Exception as e:
+            print("Polling error:", e)
         
-        saved_rule = f"Mẫu biểu đồ ({rule_content}): {response_learn.text}"
-        save_rule(saved_rule)
-        await update.message.reply_text(f"📸 ✅ Em đã soi ảnh và ghi nhớ bài học hình ảnh mới của anh Doanh!")
-        return
-
-    # Soi ảnh bình thường
-    prompt = f"Phân tích biểu đồ kỹ thuật này cho anh Doanh. Gợi ý thêm: {caption}"
-    response = model.generate_content([prompt, image])
-    await update.message.reply_text(response.text)
-
-# Thêm handler cho Telegram
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        await asyncio.sleep(2)
 
 @app.on_event("startup")
 async def startup_event():
-    await telegram_app.initialize()
-    await telegram_app.start()
+    asyncio.create_task(telegram_polling())
 
 @app.get("/")
 def root():
