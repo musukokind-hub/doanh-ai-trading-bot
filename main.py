@@ -15,7 +15,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('models/gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
 RULES_FILE = "trading_rules.json"
 
@@ -94,7 +94,6 @@ async def receive_telegram(request: Request):
         data = await request.json()
         msg = data.get("message", {})
         
-        # Lấy ID thực tế của người gửi
         chat_id = msg.get("chat", {}).get("id", TELEGRAM_CHAT_ID)
 
         text = msg.get("text", "")
