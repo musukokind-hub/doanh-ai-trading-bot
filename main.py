@@ -8,12 +8,13 @@ import google.generativeai as genai
 
 app = FastAPI()
 
+# 1. CẤU HÌNH BIẾN MÔI TRƯỜNG
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('models/gemini-1.5-flash')
 
 RULES_FILE = "trading_rules.json"
 
@@ -40,7 +41,7 @@ def send_telegram_msg(text):
     except Exception as e:
         print("Lỗi gửi Telegram:", e)
 
-# 1. NHẬN TÍN HIỆU TỪ TRADINGVIEW
+# 2. XỬ LÝ NHẬN TÍN HIỆU TỪ TRADINGVIEW (WEBHOOK)
 @app.post("/webhook")
 async def receive_webhook(request: Request):
     try:
@@ -58,7 +59,7 @@ async def receive_webhook(request: Request):
     rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có quy tắc cụ thể."
 
     prompt = f"""
-    Bạn là Trợ lý AI Trading riêng của anh Doanh.
+    Bạn là Trợ lý AI Trading riêng thuộc hệ thống Middle House Trading.
     
     TÍN HIỆU TRADINGVIEW VỪA BẮN VỀ:
     - Sự kiện: {event}
@@ -67,13 +68,13 @@ async def receive_webhook(request: Request):
     - Giá hiện tại: {price}
     - Chỉ số RSI: {rsi}
 
-    DANH SÁCH QUY TẮC ANH DOANH ĐÃ DẠY BẠN:
+    DANH SÁCH QUY TẮC ĐÃ DẠY:
     {rules_text}
 
     YÊU CẦU:
     1. Phân tích tín hiệu trên dựa trên quy tắc đã học.
     2. Nếu là ENTRY, thông báo điểm vào rõ ràng.
-    3. Nếu là REVERSAL_WARNING (M5), cảnh báo anh Doanh xem xét thoát lệnh/chốt lời.
+    3. Nếu là REVERSAL_WARNING (M5), cảnh báo xem xét thoát lệnh/chốt lời.
     4. Trả lời ngắn gọn, chuẩn kỹ thuật trading.
     """
 
@@ -85,7 +86,7 @@ async def receive_webhook(request: Request):
 
     return {"status": "ok"}
 
-# 2. NHẬN TIN NHẮN CHAT / DẠY HỌC TỪ TELEGRAM WEBHOOK
+# 3. XỬ LÝ CHAT VÀ DẠY BOT QUA TELEGRAM WEBHOOK
 @app.post("/telegram")
 async def receive_telegram(request: Request):
     try:
@@ -93,6 +94,7 @@ async def receive_telegram(request: Request):
         msg = data.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", ""))
 
+        # Kiểm tra chat ID chuẩn
         if chat_id != str(TELEGRAM_CHAT_ID):
             return {"status": "ignored"}
 
@@ -100,20 +102,20 @@ async def receive_telegram(request: Request):
         caption = msg.get("caption", "")
         photos = msg.get("photo", [])
 
-        # Xử lý Text
+        # Xử lý dạy/chat văn bản
         if text:
             if text.lower().startswith("học:") or text.lower().startswith("dạy:"):
                 rule_content = text.split(":", 1)[1].strip()
                 save_rule(rule_content)
-                send_telegram_msg(f"✅ Anh Doanh yên tâm, em đã ghi nhớ quy tắc mới:\n\"{rule_content}\"")
+                send_telegram_msg(f"✅ Hệ thống đã ghi nhớ quy tắc mới:\n\"{rule_content}\"")
             else:
                 rules = load_rules()
                 rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
-                prompt = f"Bạn là Trợ lý Trading AI của anh Doanh.\nQuy tắc đã học: {rules_text}\n\nAnh Doanh nhắn: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
+                prompt = f"Bạn là Trợ lý Trading AI thuộc Middle House Trading.\nQuy tắc đã học: {rules_text}\n\nTin nhắn nhận được: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
                 res_ai = model.generate_content(prompt)
                 send_telegram_msg(res_ai.text)
 
-        # Xử lý Ảnh
+        # Xử lý dạy/soi hình ảnh biểu đồ
         elif photos:
             file_id = photos[-1]["file_id"]
             file_info = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}").json()
@@ -126,9 +128,9 @@ async def receive_telegram(request: Request):
                 prompt_learn = f"Tóm tắt ngắn gọn quy tắc trading từ hình ảnh này kết hợp mô tả: {rule_content}"
                 res_ai = model.generate_content([prompt_learn, image])
                 save_rule(f"Mẫu biểu đồ ({rule_content}): {res_ai.text}")
-                send_telegram_msg("📸 ✅ Em đã soi ảnh và ghi nhớ bài học hình ảnh mới của anh Doanh!")
+                send_telegram_msg("📸 ✅ Em đã soi ảnh và ghi nhớ mẫu biểu đồ mới!")
             else:
-                prompt = f"Phân tích biểu đồ kỹ thuật này cho anh Doanh. Gợi ý thêm: {caption}"
+                prompt = f"Phân tích biểu đồ kỹ thuật này giúp tôi. Gợi ý thêm: {caption}"
                 res_ai = model.generate_content([prompt, image])
                 send_telegram_msg(res_ai.text)
 
@@ -136,6 +138,12 @@ async def receive_telegram(request: Request):
         print("Lỗi xử lý Telegram:", e)
 
     return {"status": "ok"}
+
+# 4. THÔNG BÁO TỰ ĐỘNG KHI KẾT NỐI SERVER THÀNH CÔNG
+@app.on_event("startup")
+async def startup_event():
+    welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý đã kết nối thành công và sẵn sàng hoạt động 24/7!"
+    send_telegram_msg(welcome_msg)
 
 @app.get("/")
 def root():
