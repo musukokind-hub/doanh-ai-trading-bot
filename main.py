@@ -15,9 +15,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
 
 RULES_FILE = "trading_rules.json"
+
+def get_model():
+    # Sử dụng model hỗ trợ chuẩn mới nhất
+    return genai.GenerativeModel('gemini-2.5-flash')
 
 def load_rules():
     if os.path.exists(RULES_FILE):
@@ -80,6 +83,7 @@ async def receive_webhook(request: Request):
     """
 
     try:
+        model = get_model()
         response = model.generate_content(prompt)
         send_telegram_msg(TELEGRAM_CHAT_ID, response.text)
     except Exception as e:
@@ -109,13 +113,20 @@ async def receive_telegram(request: Request):
             else:
                 rules = load_rules()
                 rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
-                prompt = f"Bạn là Trợ lý Trading AI thuộc Middle House Trading.\nQuy tắc đã học: {rules_text}\n\nTin nhắn nhận được: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
+                prompt = f"Bạn là Trợ lý Trading AI thuộc Middle House Trading.\nQuy tắc đã học: {rules_text}\n\nTin nhắn nhận được từ người dùng: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
                 
                 try:
+                    model = get_model()
                     res_ai = model.generate_content(prompt)
                     send_telegram_msg(chat_id, res_ai.text)
                 except Exception as err:
-                    send_telegram_msg(chat_id, f"🤖 Đã nhận tin nhắn: '{text}'\n⚠️ Lỗi gọi Gemini AI: {err}")
+                    # Nếu model mới chưa hỗ trợ ở API Key hiện tại, tự động chuyển về model dự phòng
+                    try:
+                        fallback_model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                        res_ai = fallback_model.generate_content(prompt)
+                        send_telegram_msg(chat_id, res_ai.text)
+                    except Exception as err2:
+                        send_telegram_msg(chat_id, f"🤖 Lỗi gọi Gemini AI: {err2}")
 
         # Xử lý dạy/soi hình ảnh biểu đồ
         elif photos:
@@ -129,6 +140,7 @@ async def receive_telegram(request: Request):
                 rule_content = caption.split(":", 1)[1].strip()
                 prompt_learn = f"Tóm tắt ngắn gọn quy tắc trading từ hình ảnh này kết hợp mô tả: {rule_content}"
                 try:
+                    model = get_model()
                     res_ai = model.generate_content([prompt_learn, image])
                     save_rule(f"Mẫu biểu đồ ({rule_content}): {res_ai.text}")
                     send_telegram_msg(chat_id, "📸 ✅ Em đã soi ảnh và ghi nhớ mẫu biểu đồ mới!")
@@ -137,6 +149,7 @@ async def receive_telegram(request: Request):
             else:
                 prompt = f"Phân tích biểu đồ kỹ thuật này giúp tôi. Gợi ý thêm: {caption}"
                 try:
+                    model = get_model()
                     res_ai = model.generate_content([prompt, image])
                     send_telegram_msg(chat_id, res_ai.text)
                 except Exception as err:
