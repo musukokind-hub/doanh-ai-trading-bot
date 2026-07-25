@@ -13,8 +13,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('models/gemini-1.5-flash')
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('models/gemini-1.5-flash')
 
 RULES_FILE = "trading_rules.json"
 
@@ -33,9 +34,9 @@ def save_rule(rule_text):
     with open(RULES_FILE, "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
 
-def send_telegram_msg(text):
+def send_telegram_msg(target_chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    payload = {"chat_id": target_chat_id, "text": text}
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
@@ -80,9 +81,9 @@ async def receive_webhook(request: Request):
 
     try:
         response = model.generate_content(prompt)
-        send_telegram_msg(response.text)
+        send_telegram_msg(TELEGRAM_CHAT_ID, response.text)
     except Exception as e:
-        send_telegram_msg(f"🟢 Tín hiệu {event} - {symbol} (Giá: {price}, RSI: {rsi})")
+        send_telegram_msg(TELEGRAM_CHAT_ID, f"🟢 Tín hiệu {event} - {symbol} (Giá: {price}, RSI: {rsi})")
 
     return {"status": "ok"}
 
@@ -92,11 +93,9 @@ async def receive_telegram(request: Request):
     try:
         data = await request.json()
         msg = data.get("message", {})
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-
-        # Kiểm tra chat ID chuẩn
-        if chat_id != str(TELEGRAM_CHAT_ID):
-            return {"status": "ignored"}
+        
+        # Lấy ID thực tế của người gửi
+        chat_id = msg.get("chat", {}).get("id", TELEGRAM_CHAT_ID)
 
         text = msg.get("text", "")
         caption = msg.get("caption", "")
@@ -107,13 +106,17 @@ async def receive_telegram(request: Request):
             if text.lower().startswith("học:") or text.lower().startswith("dạy:"):
                 rule_content = text.split(":", 1)[1].strip()
                 save_rule(rule_content)
-                send_telegram_msg(f"✅ Hệ thống đã ghi nhớ quy tắc mới:\n\"{rule_content}\"")
+                send_telegram_msg(chat_id, f"✅ Hệ thống đã ghi nhớ quy tắc mới:\n\"{rule_content}\"")
             else:
                 rules = load_rules()
                 rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
                 prompt = f"Bạn là Trợ lý Trading AI thuộc Middle House Trading.\nQuy tắc đã học: {rules_text}\n\nTin nhắn nhận được: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
-                res_ai = model.generate_content(prompt)
-                send_telegram_msg(res_ai.text)
+                
+                try:
+                    res_ai = model.generate_content(prompt)
+                    send_telegram_msg(chat_id, res_ai.text)
+                except Exception as err:
+                    send_telegram_msg(chat_id, f"🤖 Đã nhận tin nhắn: '{text}'\n⚠️ Lỗi gọi Gemini AI: {err}")
 
         # Xử lý dạy/soi hình ảnh biểu đồ
         elif photos:
@@ -126,13 +129,19 @@ async def receive_telegram(request: Request):
             if caption.lower().startswith("học:") or caption.lower().startswith("dạy:"):
                 rule_content = caption.split(":", 1)[1].strip()
                 prompt_learn = f"Tóm tắt ngắn gọn quy tắc trading từ hình ảnh này kết hợp mô tả: {rule_content}"
-                res_ai = model.generate_content([prompt_learn, image])
-                save_rule(f"Mẫu biểu đồ ({rule_content}): {res_ai.text}")
-                send_telegram_msg("📸 ✅ Em đã soi ảnh và ghi nhớ mẫu biểu đồ mới!")
+                try:
+                    res_ai = model.generate_content([prompt_learn, image])
+                    save_rule(f"Mẫu biểu đồ ({rule_content}): {res_ai.text}")
+                    send_telegram_msg(chat_id, "📸 ✅ Em đã soi ảnh và ghi nhớ mẫu biểu đồ mới!")
+                except Exception as err:
+                    send_telegram_msg(chat_id, f"⚠️ Lỗi xử lý hình ảnh AI: {err}")
             else:
                 prompt = f"Phân tích biểu đồ kỹ thuật này giúp tôi. Gợi ý thêm: {caption}"
-                res_ai = model.generate_content([prompt, image])
-                send_telegram_msg(res_ai.text)
+                try:
+                    res_ai = model.generate_content([prompt, image])
+                    send_telegram_msg(chat_id, res_ai.text)
+                except Exception as err:
+                    send_telegram_msg(chat_id, f"⚠️ Lỗi phân tích ảnh AI: {err}")
 
     except Exception as e:
         print("Lỗi xử lý Telegram:", e)
@@ -143,7 +152,8 @@ async def receive_telegram(request: Request):
 @app.on_event("startup")
 async def startup_event():
     welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý đã kết nối thành công và sẵn sàng hoạt động 24/7!"
-    send_telegram_msg(welcome_msg)
+    if TELEGRAM_CHAT_ID:
+        send_telegram_msg(TELEGRAM_CHAT_ID, welcome_msg)
 
 @app.get("/")
 def root():
