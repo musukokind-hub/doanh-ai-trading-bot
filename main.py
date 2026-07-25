@@ -1,7 +1,6 @@
 import os
 import json
 import requests
-import base64
 from fastapi import FastAPI, Request
 
 app = FastAPI()
@@ -9,7 +8,7 @@ app = FastAPI()
 # 1. CẤU HÌNH BIẾN MÔI TRƯỜNG
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 RULES_FILE = "trading_rules.json"
 
@@ -36,32 +35,26 @@ def send_telegram_msg(target_chat_id, text):
     except Exception as e:
         print("Lỗi gửi Telegram:", e)
 
-# HÀM GỌI TRỰC TIẾP GEMINI API CHUẨN GOOGLE
-def call_gemini_api(prompt, image_bytes=None):
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    
-    parts = []
-    if image_bytes:
-        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-        parts.append({
-            "inline_data": {
-                "mime_type": "image/jpeg",
-                "data": encoded_image
-            }
-        })
-    parts.append({"text": prompt})
-
+# HÀM GỌI GROQ AI (TỐC ĐỘ SIÊU NHANH)
+def call_groq_api(prompt):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
     payload = {
-        "contents": [{
-            "parts": parts
-        }]
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": "Bạn là Trợ lý AI Trading cao cấp thuộc hệ thống Middle House Trading."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.5
     }
 
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
     if response.status_code == 200:
         res_data = response.json()
-        return res_data['candidates'][0]['content']['parts'][0]['text']
+        return res_data['choices'][0]['message']['content']
     else:
         raise Exception(f"HTTP {response.status_code}: {response.text}")
 
@@ -83,8 +76,6 @@ async def receive_webhook(request: Request):
     rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có quy tắc cụ thể."
 
     prompt = f"""
-    Bạn là Trợ lý AI Trading riêng thuộc hệ thống Middle House Trading.
-    
     TÍN HIỆU TRADINGVIEW VỪA BẮN VỀ:
     - Sự kiện: {event}
     - Mã tài sản: {symbol}
@@ -103,7 +94,7 @@ async def receive_webhook(request: Request):
     """
 
     try:
-        ai_reply = call_gemini_api(prompt)
+        ai_reply = call_groq_api(prompt)
         send_telegram_msg(TELEGRAM_CHAT_ID, ai_reply)
     except Exception as e:
         send_telegram_msg(TELEGRAM_CHAT_ID, f"🟢 Tín hiệu {event} - {symbol} (Giá: {price}, RSI: {rsi})")
@@ -121,7 +112,6 @@ async def receive_telegram(request: Request):
 
         text = msg.get("text", "")
         caption = msg.get("caption", "")
-        photos = msg.get("photo", [])
 
         # Xử lý dạy/chat văn bản
         if text:
@@ -132,37 +122,13 @@ async def receive_telegram(request: Request):
             else:
                 rules = load_rules()
                 rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
-                prompt = f"Bạn là Trợ lý Trading AI thuộc Middle House Trading.\nQuy tắc đã học: {rules_text}\n\nTin nhắn từ người dùng: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
+                prompt = f"Quy tắc trading đã học: {rules_text}\n\nTin nhắn từ người dùng: '{text}'\nHãy trả lời ngắn gọn, phân tích chuẩn kỹ thuật."
                 
                 try:
-                    ai_reply = call_gemini_api(prompt)
+                    ai_reply = call_groq_api(prompt)
                     send_telegram_msg(chat_id, ai_reply)
                 except Exception as err:
-                    send_telegram_msg(chat_id, f"⚠️ Lỗi kết nối Gemini API: {err}")
-
-        # Xử lý dạy/soi hình ảnh biểu đồ
-        elif photos:
-            file_id = photos[-1]["file_id"]
-            file_info = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}").json()
-            file_path = file_info["result"]["file_path"]
-            img_bytes = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}").content
-
-            if caption.lower().startswith("học:") or caption.lower().startswith("dạy:"):
-                rule_content = caption.split(":", 1)[1].strip()
-                prompt_learn = f"Tóm tắt ngắn gọn quy tắc trading từ hình ảnh này kết hợp mô tả: {rule_content}"
-                try:
-                    ai_reply = call_gemini_api(prompt_learn, img_bytes)
-                    save_rule(f"Mẫu biểu đồ ({rule_content}): {ai_reply}")
-                    send_telegram_msg(chat_id, "📸 ✅ Em đã soi ảnh và ghi nhớ mẫu biểu đồ mới!")
-                except Exception as err:
-                    send_telegram_msg(chat_id, f"⚠️ Lỗi xử lý hình ảnh AI: {err}")
-            else:
-                prompt = f"Phân tích biểu đồ kỹ thuật này giúp tôi. Gợi ý thêm: {caption}"
-                try:
-                    ai_reply = call_gemini_api(prompt, img_bytes)
-                    send_telegram_msg(chat_id, ai_reply)
-                except Exception as err:
-                    send_telegram_msg(chat_id, f"⚠️ Lỗi phân tích ảnh AI: {err}")
+                    send_telegram_msg(chat_id, f"⚠️ Lỗi kết nối Groq API: {err}")
 
     except Exception as e:
         print("Lỗi xử lý Telegram:", e)
@@ -172,7 +138,7 @@ async def receive_telegram(request: Request):
 # 4. THÔNG BÁO TỰ ĐỘNG KHI KẾT NỐI SERVER THÀNH CÔNG
 @app.on_event("startup")
 async def startup_event():
-    welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý đã kết nối thành công và sẵn sàng hoạt động 24/7!"
+    welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý (Groq Engine) đã kết nối thành công và sẵn sàng hoạt động 24/7!"
     if TELEGRAM_CHAT_ID:
         send_telegram_msg(TELEGRAM_CHAT_ID, welcome_msg)
 
