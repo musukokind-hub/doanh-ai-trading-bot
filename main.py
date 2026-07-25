@@ -1,10 +1,8 @@
 import os
 import json
 import requests
-from io import BytesIO
+import base64
 from fastapi import FastAPI, Request
-from PIL import Image
-import google.generativeai as genai
 
 app = FastAPI()
 
@@ -13,14 +11,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
 RULES_FILE = "trading_rules.json"
-
-def get_model():
-    # Sử dụng model hỗ trợ chuẩn mới nhất
-    return genai.GenerativeModel('gemini-2.5-flash')
 
 def load_rules():
     if os.path.exists(RULES_FILE):
@@ -44,6 +35,35 @@ def send_telegram_msg(target_chat_id, text):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print("Lỗi gửi Telegram:", e)
+
+# HÀM GỌI TRỰC TIẾP GEMINI API CHUẨN GOOGLE
+def call_gemini_api(prompt, image_bytes=None):
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    
+    parts = []
+    if image_bytes:
+        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": encoded_image
+            }
+        })
+    parts.append({"text": prompt})
+
+    payload = {
+        "contents": [{
+            "parts": parts
+        }]
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    if response.status_code == 200:
+        res_data = response.json()
+        return res_data['candidates'][0]['content']['parts'][0]['text']
+    else:
+        raise Exception(f"HTTP {response.status_code}: {response.text}")
 
 # 2. XỬ LÝ NHẬN TÍN HIỆU TỪ TRADINGVIEW (WEBHOOK)
 @app.post("/webhook")
@@ -83,9 +103,8 @@ async def receive_webhook(request: Request):
     """
 
     try:
-        model = get_model()
-        response = model.generate_content(prompt)
-        send_telegram_msg(TELEGRAM_CHAT_ID, response.text)
+        ai_reply = call_gemini_api(prompt)
+        send_telegram_msg(TELEGRAM_CHAT_ID, ai_reply)
     except Exception as e:
         send_telegram_msg(TELEGRAM_CHAT_ID, f"🟢 Tín hiệu {event} - {symbol} (Giá: {price}, RSI: {rsi})")
 
@@ -113,20 +132,13 @@ async def receive_telegram(request: Request):
             else:
                 rules = load_rules()
                 rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
-                prompt = f"Bạn là Trợ lý Trading AI thuộc Middle House Trading.\nQuy tắc đã học: {rules_text}\n\nTin nhắn nhận được từ người dùng: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
+                prompt = f"Bạn là Trợ lý Trading AI thuộc Middle House Trading.\nQuy tắc đã học: {rules_text}\n\nTin nhắn từ người dùng: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
                 
                 try:
-                    model = get_model()
-                    res_ai = model.generate_content(prompt)
-                    send_telegram_msg(chat_id, res_ai.text)
+                    ai_reply = call_gemini_api(prompt)
+                    send_telegram_msg(chat_id, ai_reply)
                 except Exception as err:
-                    # Nếu model mới chưa hỗ trợ ở API Key hiện tại, tự động chuyển về model dự phòng
-                    try:
-                        fallback_model = genai.GenerativeModel('gemini-1.5-flash-latest')
-                        res_ai = fallback_model.generate_content(prompt)
-                        send_telegram_msg(chat_id, res_ai.text)
-                    except Exception as err2:
-                        send_telegram_msg(chat_id, f"🤖 Lỗi gọi Gemini AI: {err2}")
+                    send_telegram_msg(chat_id, f"⚠️ Lỗi kết nối Gemini API: {err}")
 
         # Xử lý dạy/soi hình ảnh biểu đồ
         elif photos:
@@ -134,24 +146,21 @@ async def receive_telegram(request: Request):
             file_info = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}").json()
             file_path = file_info["result"]["file_path"]
             img_bytes = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}").content
-            image = Image.open(BytesIO(img_bytes))
 
             if caption.lower().startswith("học:") or caption.lower().startswith("dạy:"):
                 rule_content = caption.split(":", 1)[1].strip()
                 prompt_learn = f"Tóm tắt ngắn gọn quy tắc trading từ hình ảnh này kết hợp mô tả: {rule_content}"
                 try:
-                    model = get_model()
-                    res_ai = model.generate_content([prompt_learn, image])
-                    save_rule(f"Mẫu biểu đồ ({rule_content}): {res_ai.text}")
+                    ai_reply = call_gemini_api(prompt_learn, img_bytes)
+                    save_rule(f"Mẫu biểu đồ ({rule_content}): {ai_reply}")
                     send_telegram_msg(chat_id, "📸 ✅ Em đã soi ảnh và ghi nhớ mẫu biểu đồ mới!")
                 except Exception as err:
                     send_telegram_msg(chat_id, f"⚠️ Lỗi xử lý hình ảnh AI: {err}")
             else:
                 prompt = f"Phân tích biểu đồ kỹ thuật này giúp tôi. Gợi ý thêm: {caption}"
                 try:
-                    model = get_model()
-                    res_ai = model.generate_content([prompt, image])
-                    send_telegram_msg(chat_id, res_ai.text)
+                    ai_reply = call_gemini_api(prompt, img_bytes)
+                    send_telegram_msg(chat_id, ai_reply)
                 except Exception as err:
                     send_telegram_msg(chat_id, f"⚠️ Lỗi phân tích ảnh AI: {err}")
 
