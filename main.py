@@ -11,21 +11,33 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 RULES_FILE = "trading_rules.json"
+MARKET_STATE_FILE = "market_state.json"
 
-def load_rules():
-    if os.path.exists(RULES_FILE):
+def load_json(filepath):
+    if os.path.exists(filepath):
         try:
-            with open(RULES_FILE, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return []
-    return []
+            return {} if "state" in filepath else []
+    return {} if "state" in filepath else []
+
+def save_json(filepath, data):
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def save_rule(rule_text):
-    rules = load_rules()
-    rules.append(rule_text)
-    with open(RULES_FILE, "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    rules = load_json(RULES_FILE)
+    if isinstance(rules, list):
+        rules.append(rule_text)
+        save_json(RULES_FILE, rules)
+
+def update_market_state(symbol, data):
+    states = load_json(MARKET_STATE_FILE)
+    if not isinstance(states, dict):
+        states = {}
+    states[symbol] = data
+    save_json(MARKET_STATE_FILE, states)
 
 def send_telegram_msg(target_chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -35,7 +47,6 @@ def send_telegram_msg(target_chat_id, text):
     except Exception as e:
         print("Lỗi gửi Telegram:", e)
 
-# HÀM GỌI GROQ AI (LLAMA 3.3 - SIÊU NHANH & MIỄN PHÍ)
 def call_groq_api(prompt):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -45,10 +56,13 @@ def call_groq_api(prompt):
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "Bạn là Trợ lý AI Trading thuộc hệ thống Middle House Trading."},
+            {
+                "role": "system", 
+                "content": "Bạn là Trợ lý AI Phân tích Kỹ thuật Chuyên nghiệp thuộc Middle House Trading. Hãy phân tích ngắn gọn, quyết đoán xu hướng (BUY/SELL/NEUTRAL) dựa trên dữ liệu thị trường và logic được cung cấp."
+            },
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.5
+        "temperature": 0.4
     }
 
     response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -58,7 +72,7 @@ def call_groq_api(prompt):
     else:
         raise Exception(f"HTTP {response.status_code}: {response.text}")
 
-# 2. XỬ LÝ NHẬN TÍN HIỆU TỪ TRADINGVIEW (WEBHOOK)
+# 2. XỬ LÝ NHẬN CẬP NHẬT TỪ TRADINGVIEW (WEBHOOK)
 @app.post("/webhook")
 async def receive_webhook(request: Request):
     try:
@@ -66,61 +80,61 @@ async def receive_webhook(request: Request):
     except Exception:
         return {"status": "error", "message": "Invalid JSON"}
 
-    event = data.get("event", "UNKNOWN")
-    symbol = data.get("symbol", "N/A")
-    tf = data.get("timeframe", "N/A")
-    price = data.get("price", "N/A")
-    rsi = data.get("rsi", "N/A")
+    symbol = data.get("symbol", "XAUUSD")
+    update_market_state(symbol, data)
 
-    rules = load_rules()
-    rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có quy tắc cụ thể."
-
-    prompt = f"""
-    TÍN HIỆU TRADINGVIEW VỪA BẮN VỀ:
-    - Sự kiện: {event}
-    - Mã tài sản: {symbol}
-    - Khung thời gian: {tf}
-    - Giá hiện tại: {price}
-    - Chỉ số RSI: {rsi}
-
-    DANH SÁCH QUY TẮC ĐÃ DẠY:
-    {rules_text}
-
-    YÊU CẦU:
-    1. Phân tích tín hiệu trên dựa trên quy tắc đã học.
-    2. Nếu là ENTRY, thông báo điểm vào rõ ràng.
-    3. Nếu là REVERSAL_WARNING (M5), cảnh báo xem xét thoát lệnh/chốt lời.
-    4. Trả lời ngắn gọn, chuẩn kỹ thuật trading.
-    """
-
-    try:
-        ai_reply = call_groq_api(prompt)
-        send_telegram_msg(TELEGRAM_CHAT_ID, ai_reply)
-    except Exception as e:
-        send_telegram_msg(TELEGRAM_CHAT_ID, f"🟢 Tín hiệu {event} - {symbol} (Giá: {price}, RSI: {rsi})")
+    event = data.get("event", "UPDATE")
+    if event in ["ENTRY_BUY", "ENTRY_SELL", "REVERSAL_WARNING"]:
+        rules = load_json(RULES_FILE)
+        rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có quy tắc."
+        prompt = f"TÍN HIỆU TỪ TRADINGVIEW: {data}\nLOGIC DẠY: {rules_text}\nHãy phân tích và đưa ra khuyến nghị vào lệnh ngắn gọn."
+        
+        try:
+            ai_reply = call_groq_api(prompt)
+            send_telegram_msg(TELEGRAM_CHAT_ID, ai_reply)
+        except Exception as e:
+            send_telegram_msg(TELEGRAM_CHAT_ID, f"🟢 Tín hiệu {event} - {symbol}")
 
     return {"status": "ok"}
 
-# 3. XỬ LÝ CHAT VÀ DẠY BOT QUA TELEGRAM WEBHOOK
+# 3. XỬ LÝ CHAT VÀ PHÂN TÍCH THEO YÊU CẦU TRÊN TELEGRAM
 @app.post("/telegram")
 async def receive_telegram(request: Request):
     try:
         data = await request.json()
         msg = data.get("message", {})
-        
         chat_id = msg.get("chat", {}).get("id", TELEGRAM_CHAT_ID)
-
         text = msg.get("text", "")
 
         if text:
+            # Học quy tắc logic mới
             if text.lower().startswith("học:") or text.lower().startswith("dạy:"):
                 rule_content = text.split(":", 1)[1].strip()
                 save_rule(rule_content)
-                send_telegram_msg(chat_id, f"✅ Hệ thống đã ghi nhớ quy tắc mới:\n\"{rule_content}\"")
+                send_telegram_msg(chat_id, f"✅ Đã ghi nhớ logic giao dịch mới:\n\"{rule_content}\"")
+            
+            # Trả lời câu hỏi xu hướng thị trường
             else:
-                rules = load_rules()
-                rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có."
-                prompt = f"Quy tắc trading đã học: {rules_text}\n\nTin nhắn từ người dùng: '{text}'\nHãy trả lời ngắn gọn, chuẩn kỹ thuật."
+                rules = load_json(RULES_FILE)
+                rules_text = "\n".join([f"- {r}" for r in rules]) if rules else "Chưa có quy tắc cụ thể."
+                
+                market_data = load_json(MARKET_STATE_FILE)
+                gold_data = market_data.get("XAUUSD", "Chưa có dữ liệu cập nhật gần đây từ TradingView.")
+
+                prompt = f"""
+                NGƯỜI DÙNG HỎI: "{text}"
+                
+                DỮ LIỆU THỊ TRƯỜNG CẬP NHẬT MỚI NHẤT (XAUUSD):
+                {gold_data}
+
+                LOGIC GIAO DỊCH ĐÃ DẠY:
+                {rules_text}
+
+                YÊU CẦU TRẢ LỜI:
+                - Dựa vào Dữ liệu thị trường và Logic giao dịch trên để nhận định xu hướng (BUY hay SELL hay ĐỜI SIGNAL).
+                - Trả lời thẳng vào vấn đề, ngắn gọn, chuẩn kỹ thuật trading.
+                - Nếu chưa có dữ liệu biểu đồ, hướng dẫn người dùng chụp gửi ảnh màn hình chart để soi ngay.
+                """
                 
                 try:
                     ai_reply = call_groq_api(prompt)
@@ -133,10 +147,9 @@ async def receive_telegram(request: Request):
 
     return {"status": "ok"}
 
-# 4. THÔNG BÁO TỰ ĐỘNG KHI KẾT NỐI SERVER THÀNH CÔNG
 @app.on_event("startup")
 async def startup_event():
-    welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý (Groq Engine) đã kết nối thành công 24/7!"
+    welcome_msg = "🚀 [MIDDLE HOUSE TRADING AI]\nHệ thống AI Trợ lý đã sẵn sàng phân tích biểu đồ & xu hướng 24/7!"
     if TELEGRAM_CHAT_ID:
         send_telegram_msg(TELEGRAM_CHAT_ID, welcome_msg)
 
